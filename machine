@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+
+from __future__ import print_function, with_statement
+
+import argparse
+import boto3
+import fnmatch
+import os
+import subprocess
+import sys
+import yaml
+
+__version__ = '0.312.0'
+
+class Machine(object):
+    def __init__(self, *, key_name, security_group_id, ssh_config_path,
+                 ssh_identity_file, image_user_mapping,
+                 instance_type_image_mappings, quiet=False, **kwargs):
+        self._quiet = quiet
+        self._ec2 = boto3.resource("ec2")
+        self._key_name = key_name
+        self._security_group_id = security_group_id
+        self._ssh_config_path = ssh_config_path
+        self._ssh_identity_file = ssh_identity_file
+        self._image_user_mapping = image_user_mapping
+        self._instance_type_image_mappings = instance_type_image_mappings
+
+    def version(self, **kwargs):
+        print('machine {}'.format(__version__))
+        print()
+        print('https://github.com/hholst80/machine')
+
+    def ls(self, **kwargs):
+        instances = self._get_all_instances()
+
+        if not self._quiet:
+            line = "{:20}{:20}\n{:20}{:20}{:20}".format("name", "endpoint",
+                                                        "id", "state", "type")
+            print(line)
+            print('-'*80)
+
+        for instance in instances:
+            id = instance.id
+            state = "{Name} ({Code})".format(**instance.state)
+            assert id is not None
+            name = self._get_name(instance) or ""
+            type = instance.instance_type
+            user = self._get_user(instance.image_id)
+            ip = instance.public_ip_address
+            if user and ip:
+                endpoint = "{}@{}".format(user, ip)
+            else:
+                endpoint = ""
+            if not self._quiet:
+                line = "{:20}{:20}\n{:20}{:20}{:20}".format(name, endpoint,
+                                                            id, state, type)
+            else:
+                line = "{:20}{:20}".format(name, endpoint)
+            print(line)
+
+    def type(self, *, instance_id, **kwargs):
+        try:
+            instance = self._resolve_instance(instance_id)
+            print(instance.instance_type)
+            return instance.instance_type
+        except:
+            print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
+
+    def start(self, *, ids, **kwargs):
+        for _id in ids:
+            try:
+                instance = self._resolve_instance(_id)
+                result = instance.start()
+                if result['ResponseMetadata']['HTTPStatusCode'] != 200:
+                    self._display_json(result, file=sys.stderr)
+                else:
+                    print('starting {}'.format(instance.id))
+            except Exception as e:
+                print(str(e), file=sys.stderr)
+
+    def stop(self, *, ids, **kwargs):
+        for _id in ids:
+            try:
+                instance = self._resolve_instance(_id)
+                result = instance.stop()
+                if result['ResponseMetadata']['HTTPStatusCode'] != 200:
+                    self._display_json(result, file=sys.stderr)
+                else:
+                    print('stopping {}'.format(instance.id))
+            except Exception as e:
+                print(str(e), file=sys.stderr)
+
+    def rm(self, *, ids, **kwargs):
+        for _id in ids:
+            try:
+                instance = self._resolve_instance(_id)
+                if instance is None:
+                    print("error: no such instance {}".format(_id),
+                          file=sys.stderr)
+                    continue
+                result = instance.terminate()
+                if result['ResponseMetadata']['HTTPStatusCode'] != 200:
+                    self._display_json(result, file=sys.stderr)
+                else:
+                    print('terminating {}'.format(instance.id))
+            except Exception as e:
+                print(str(e), file=sys.stderr)
+
+    def image_create(self, *, instance_id, name, description=None,
+                     no_reboot=False, **kwargs):
+        try:
+            instance = self._resolve_instance(instance_id)
+            kwargs = {'Name': name, 'NoReboot': no_reboot}
+            if description is not None:
+                kwargs.update({'Description': description})
+            image = instance.create_image(**kwargs)
+            print("created {} from {}".format(image.id, instance.id))
+        except Exception as e:
+            print(str(e), file=sys.stderr)
+
+    def image_ls(self, **kwargs):
+        images = self._ec2.images.filter(Owners=['self'])
+        for image in images:
+            print("{:20}{:20}{:20}".format(image.id, image.state, image.name))
+
+    def image_rm(self, *, image_ids):
+        for _id in image_ids:
+            images = self._ec2.images.filter(Owners=['self'])
+            for image in images:
+                if image.id == _id or image.name == _id:
+                    print("removing {} {}".format(image.id, image.name))
+                    image.deregister()
+
+    def ssh(self, host, *commands, **kwargs):
+        self.export()
+        args = ('ssh', '-F', self._ssh_config_path, host, '--') + commands
+        subprocess.call(args)
+
+    def scp(self, *, commands, quiet=False, verbose=False, recursive=False,
+            **kwargs):
+        self.export()
+        cmd = ('scp', '-F', self._ssh_config_path)
+        if quiet:
+            cmd += ('-q',)
+        if verbose:
+            cmd += ('-v',)
+        if recursive:
+            cmd += ('-r',)
+        cmd += ('--',) + tuple(commands)
+        subprocess.call(cmd)
+
+    def ip(self, *, instance_id, **kwargs):
+        try:
+            instance = self._resolve_instance(instance_id)
+            print(instance.public_ip_address)
+        except:
+            print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
+
+    def create(self, *, instance_type, names, image_id=None, terminate=False, **kwargs):
+        if image_id is None:
+            image_id = self._resolve_image_id(instance_type)
+        all_names = [self._get_name(instance) for instance in self._get_all_instances()]
+        for name in names:
+            if name in all_names:
+                print('name {} already exists. skipping.'.format(name), file=sys.stderr)
+                continue
+            kwargs = {
+                'ImageId': image_id,
+                'KeyName': self._key_name,
+                'SecurityGroupIds': [self._security_group_id],
+                'InstanceType': instance_type,
+                'EbsOptimized': True,
+                'MinCount': 1,
+                'MaxCount': 1,
+            }
+            if terminate:
+                kwargs.update({'InstanceInitiatedShutdownBehavior':
+                               'terminate'})
+            instance, = self._ec2.create_instances(**kwargs)
+            instance.create_tags(Tags=[{'Key': 'Name', 'Value': name}])
+            all_names.append(name)
+            print('{} {}'.format(instance.id, name))
+
+    def export(self):
+        instances = self._ec2.instances.filter(Filters=[
+            {"Name": "instance-state-code", "Values": ["16"]},
+            {"Name": "key-name", "Values": [self._key_name]},
+        ])
+
+        with open(self._ssh_config_path, "w") as f:
+            for instance in instances:
+                id = instance.id
+                name = self._get_name(instance) or ""
+                user = self._get_user(instance.image_id)
+                ip = instance.public_ip_address
+                for host in [id, name] if name else [id]:
+                    f.write("Host {}\n".format(host))
+                    f.write("\tHostname {}\n".format(ip))
+                    f.write("\tUser {}\n".format(user))
+                    f.write("\tIdentityFile {}\n".format(self._ssh_identity_file))
+                    f.write("\tStrictHostKeyChecking {}\n".format("no"))
+                    f.write("\tUserKnownHostsFile {}\n".format("/dev/null"))
+                    f.write("\tLogLevel {}\n".format("quiet"))
+
+    def _get_name(self, instance):
+        tags = instance.tags
+        if tags is None:
+            return None
+        for tag in tags:
+            if tag['Key'] == 'Name':
+                return tag['Value']
+        return None
+
+    def _resolve_image_id(self, instance_type):
+        for mapping in self._instance_type_image_mappings:
+            for pat, image in mapping.items():
+                if fnmatch.fnmatch(instance_type, pat):
+                    return image
+        return None
+
+    def _get_user(self, image_id, default='ec2-user'):
+        return self._image_user_mapping.get(image_id, default)
+
+    def _resolve_instance(self, instance_id):
+        for instance in self._get_all_instances():
+            if instance_id == instance.id:
+                return instance
+            for tag in instance.tags:
+                if tag['Key'] == 'Name':
+                    if tag['Value'] == instance_id:
+                        return instance
+        return None
+
+    def _get_all_instances(self):
+        instances = self._ec2.instances.filter(Filters=[
+            {"Name": "instance-state-code",
+             "Values": ["0", "16", "32", "64", "80"]},
+            {"Name": "key-name", "Values": [self._key_name]},
+        ])
+        return instances
+
+    @staticmethod
+    def get_parser():
+        parser = argparse.ArgumentParser()
+        parser.add_argument('-q', '--quiet', action='store_true',
+                            help='less verbose output')
+        parser.add_argument('--key-name')
+        parser.add_argument('--security-group-id')
+        parser.add_argument('-F', '--ssh-config-path',
+                            help='path to SSH config file')
+
+        subparsers = parser.add_subparsers()
+
+        subparser = subparsers.add_parser('version')
+        subparser.set_defaults(command=Machine.version)
+
+        subparser = subparsers.add_parser('ls')
+        subparser.set_defaults(command=Machine.ls)
+
+        subparser = subparsers.add_parser('create')
+        subparser.add_argument('instance_type')
+        subparser.add_argument('names', type=str, nargs='*')
+        subparser.add_argument('--image-id', type=str, default=None)
+        subparser.add_argument('--terminate', action='store_true',
+                               help='terminate on shutdown')
+        subparser.set_defaults(command=Machine.create)
+
+        for cmd in ['start', 'stop', 'rm']:
+            subparser = subparsers.add_parser(cmd)
+            subparser.add_argument('ids', type=str, nargs='+')
+            command = getattr(Machine, cmd)
+            subparser.set_defaults(command=command)
+
+        for cmd in ['ip', 'type']:
+            subparser = subparsers.add_parser(cmd)
+            subparser.add_argument('instance_id')
+            command = getattr(Machine, cmd)
+            subparser.set_defaults(command=command)
+
+        subparser = subparsers.add_parser('export')
+        subparser.set_defaults(command=Machine.export)
+
+        subparser = subparsers.add_parser('ssh')
+        subparser.add_argument('host')
+        subparser.add_argument('commands', type=str, nargs='*')
+        subparser.set_defaults(command=Machine.ssh)
+
+        subparser = subparsers.add_parser('scp')
+        subparser.add_argument('-q', dest='quiet', action='store_true',
+                               help='quiet mode')
+        subparser.add_argument('-r', dest='recursive', action='store_true',
+                               help='recursively copy entire directories')
+        subparser.add_argument('-v', dest='verbose', action='store_true',
+                               help='verbose mode')
+        subparser.add_argument('-F', '--ssh-config-path', default='/tmp/ssh_config',
+                               help='ssh_config path')
+        subparser.add_argument('commands', type=str, nargs='*')
+        subparser.set_defaults(command=Machine.scp)
+
+        subparser = subparsers.add_parser('image-create')
+        subparser.add_argument('instance_id')
+        subparser.add_argument('name')
+        subparser.add_argument('--description')
+        subparser.set_defaults(command=Machine.image_create)
+
+        subparser = subparsers.add_parser('image-ls')
+        subparser.set_defaults(command=Machine.image_ls)
+
+        subparser = subparsers.add_parser('image-rm')
+        subparser.add_argument('images', nargs='*')
+        subparser.set_defaults(command=Machine.image_rm)
+
+        return parser
+
+def main(argv):
+    parser = Machine.get_parser()
+    args = parser.parse_args(argv[1:])
+    kwargs = {}
+
+    # Config file placement, still an unsolved problem in 2017.
+
+    machine_confs = [
+        argv[0] + '.yaml',
+        os.path.join(os.environ.get('XDG_CONFIG_HOME',
+                                    os.path.join(os.environ['HOME'],
+                                                 '.config')), 'machine',
+                     'machine.yaml'),
+        # 'machine.yaml',
+    ]
+
+    for machine_conf in machine_confs:
+        if os.path.isfile(machine_conf):
+            with open(machine_conf, 'r') as f:
+                kwargs.update(yaml.load(f))
+
+    # Command line options have higher priority than yaml configs.
+
+    kwargs.update(dict(t for t in args._get_kwargs() if t[1] is not None))
+
+    machine = Machine(**kwargs)
+
+    if 'command' in args:
+        args.command(machine, **kwargs)
+    else:
+        parser.print_usage()
+
+if __name__ == '__main__':
+    main(sys.argv)

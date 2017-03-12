@@ -1,0 +1,13 @@
+ssh_config_path: "~/.ssh/ssh_config.machine"
+
+security_group_id: "sg-12345678"
+
+key_name: "default"
+ssh_identity_file: "~/.ssh/id_rsa"
+
+instance_type_image_mappings:
+  - "*": ami-e6d5d2f1       # Default AMI: Ubuntu 16.04 LTS
+
+image_user_mapping:
+  ami-0b33d91d: "ec2-user"  # Amazon
+  ami-e6d5d2f1: "ubuntu"    # Ubuntu 16.04 LTS
