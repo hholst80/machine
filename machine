@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 
 from __future__ import print_function, with_statement
-
 import argparse
-import boto3
 import fnmatch
+import json
 import os
 import subprocess
 import sys
 import yaml
+import boto3
 
-__version__ = '0.312.0'
+__version__ = '0.313.0'
 
 class Machine(object):
     def __init__(self, *, key_name, security_group_id, ssh_config_path,
@@ -34,8 +34,8 @@ class Machine(object):
         instances = self._get_all_instances()
 
         if not self._quiet:
-            line = "{:20}{:20}\n{:20}{:20}{:20}".format("name", "endpoint",
-                                                        "id", "state", "type")
+            line = "{:20}{:20}{:20}\n{:20}{:20}{:20}".format("Name", "Instance Type", "Endpoint",
+                                                             "Intance ID", "Instance State", "Status Checks")
             print(line)
             print('-'*80)
 
@@ -51,9 +51,10 @@ class Machine(object):
                 endpoint = "{}@{}".format(user, ip)
             else:
                 endpoint = ""
+            checks = self._get_checks(instance) or ""
             if not self._quiet:
-                line = "{:20}{:20}\n{:20}{:20}{:20}".format(name, endpoint,
-                                                            id, state, type)
+                line = "{:20}{:20}{:20}\n{:20}{:20}{:20}".format(name, type, endpoint,
+                                                                 id, state, checks)
             else:
                 line = "{:20}{:20}".format(name, endpoint)
             print(line)
@@ -201,6 +202,24 @@ class Machine(object):
                     f.write("\tStrictHostKeyChecking {}\n".format("no"))
                     f.write("\tUserKnownHostsFile {}\n".format("/dev/null"))
                     f.write("\tLogLevel {}\n".format("quiet"))
+
+    def _get_checks(self, instance):
+        args = ('aws', 'ec2', 'describe-instance-status',
+                '--instance-ids', instance.id)
+        out = subprocess.check_output(args)
+        out = out.decode('utf-8')
+        data = json.loads(out)
+        if len(data['InstanceStatuses']) == 0:
+            return None
+        data = data['InstanceStatuses'][0]
+        checks = {}
+        key = data['InstanceStatus']['Status']
+        checks[key] = checks.get(key, 0) + 1
+        key = data['SystemStatus']['Status']
+        checks[key] = checks.get(key, 0) + 1
+        if checks.get('initializing', 0) >= 1:
+            return "Initializing"
+        return '{}/2 checks passed'.format(checks.get('ok', 0))
 
     def _get_name(self, instance):
         tags = instance.tags
