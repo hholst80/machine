@@ -10,7 +10,7 @@ import sys
 import yaml
 import boto3
 
-__version__ = '0.313.0'
+__version__ = '0.316.0'
 
 class Machine(object):
     def __init__(self, *, key_name, security_group_id, ssh_config_path,
