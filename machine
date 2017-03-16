@@ -124,7 +124,7 @@ class Machine(object):
         for image in images:
             print("{:20}{:20}{:20}".format(image.id, image.state, image.name))
 
-    def image_rm(self, *, image_ids):
+    def image_rm(self, *, image_ids, **kwargs):
         for _id in image_ids:
             images = self._ec2.images.filter(Owners=['self'])
             for image in images:
@@ -157,7 +157,8 @@ class Machine(object):
         except:
             print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
 
-    def create(self, *, instance_type, names, image_id=None, terminate=False, **kwargs):
+    def create(self, *, instance_type, names, image_id=None, terminate=False,
+               **kwargs):
         if image_id is None:
             image_id = self._resolve_image_id(instance_type)
         all_names = [self._get_name(instance) for instance in self._get_all_instances()]
@@ -182,7 +183,7 @@ class Machine(object):
             all_names.append(name)
             print('{} {}'.format(instance.id, name))
 
-    def export(self):
+    def export(self, **kwargs):
         instances = self._ec2.instances.filter(Filters=[
             {"Name": "instance-state-code", "Values": ["16"]},
             {"Name": "key-name", "Values": [self._key_name]},
