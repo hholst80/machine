@@ -7,10 +7,11 @@ import json
 import os
 import subprocess
 import sys
+import socket
 import yaml
 import boto3
 
-__version__ = '0.316.0'
+__version__ = '0.320.0'
 
 class Machine(object):
     def __init__(self, *, key_name, security_group_id, ssh_config_path,
@@ -34,8 +35,10 @@ class Machine(object):
         instances = self._get_all_instances()
 
         if not self._quiet:
+            # line = "{:20}{:20}{:20}\n{:20}{:20}{:20}{:20}".format("Name", "Instance Type", "Endpoint",
+            #                                                      "Instance ID", "Instance State", "Services", "Status Checks")
             line = "{:20}{:20}{:20}\n{:20}{:20}{:20}".format("Name", "Instance Type", "Endpoint",
-                                                             "Intance ID", "Instance State", "Status Checks")
+                                                                  "Instance ID", "Instance State", "Services")
             print(line)
             print('-'*80)
 
@@ -51,10 +54,10 @@ class Machine(object):
                 endpoint = "{}@{}".format(user, ip)
             else:
                 endpoint = ""
-            checks = self._get_checks(instance) or ""
+            # checks = self._get_checks(instance) or ""
+            ok_services = " ".join(self._get_services(instance)) or ""
             if not self._quiet:
-                line = "{:20}{:20}{:20}\n{:20}{:20}{:20}".format(name, type, endpoint,
-                                                                 id, state, checks)
+                line = "{:20}{:20}{:20}\n{:20}{:20}{:20}".format(name, type, endpoint, id, state, ok_services)
             else:
                 line = "{:20}{:20}".format(name, endpoint)
             print(line)
@@ -124,8 +127,8 @@ class Machine(object):
         for image in images:
             print("{:20}{:20}{:20}".format(image.id, image.state, image.name))
 
-    def image_rm(self, *, image_ids, **kwargs):
-        for _id in image_ids:
+    def image_rm(self, *, images, **kwargs):
+        for _id in images:
             images = self._ec2.images.filter(Owners=['self'])
             for image in images:
                 if image.id == _id or image.name == _id:
@@ -150,10 +153,12 @@ class Machine(object):
         cmd += ('--',) + tuple(commands)
         subprocess.call(cmd)
 
-    def ip(self, *, instance_id, **kwargs):
+    def ip(self, *, instance_id, quiet=False, **kwargs):
         try:
             instance = self._resolve_instance(instance_id)
-            print(instance.public_ip_address)
+            if not quiet:
+                print(instance.public_ip_address)
+            return instance.public_ip_address
         except:
             print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
 
@@ -204,11 +209,25 @@ class Machine(object):
                     f.write("\tUserKnownHostsFile {}\n".format("/dev/null"))
                     f.write("\tLogLevel {}\n".format("quiet"))
 
+    def _get_services(self, instance, services={'ssh': 22}):
+        ip = self.ip(instance_id=instance.id, quiet=True)
+        ok_services = []
+        if ip is not None:
+            for service, port in services.items():
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    # TODO: We should do these calls in batch
+                    s.settimeout(0.2)
+                    s.connect((ip, port))
+                    ok_services.append(service)
+                except:
+                    pass
+        return ok_services
+
     def _get_checks(self, instance):
         args = ('aws', 'ec2', 'describe-instance-status',
                 '--instance-ids', instance.id)
-        out = subprocess.check_output(args)
-        out = out.decode('utf-8')
+        out = subprocess.check_output(args).decode('utf-8')
         data = json.loads(out)
         if len(data['InstanceStatuses']) == 0:
             return None
@@ -218,8 +237,8 @@ class Machine(object):
         checks[key] = checks.get(key, 0) + 1
         key = data['SystemStatus']['Status']
         checks[key] = checks.get(key, 0) + 1
-        if checks.get('initializing', 0) >= 1:
-            return "Initializing"
+        # if checks.get('initializing', 0) >= 1:
+        #     return "Initializing"
         return '{}/2 checks passed'.format(checks.get('ok', 0))
 
     def _get_name(self, instance):
@@ -279,7 +298,7 @@ class Machine(object):
 
         subparser = subparsers.add_parser('create')
         subparser.add_argument('instance_type')
-        subparser.add_argument('names', type=str, nargs='*')
+        subparser.add_argument('names', type=str, nargs='+')
         subparser.add_argument('--image-id', type=str, default=None)
         subparser.add_argument('--terminate', action='store_true',
                                help='terminate on shutdown')
