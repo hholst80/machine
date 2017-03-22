@@ -359,11 +359,11 @@ def main(argv):
     # Config file placement, still an unsolved problem in 2017.
 
     machine_confs = [
-        argv[0] + '.yaml',
+        argv[0] + '.yml',
         os.path.join(os.environ.get('XDG_CONFIG_HOME',
                                     os.path.join(os.environ['HOME'],
                                                  '.config')), 'machine',
-                     'machine.yaml'),
+                     'machine.yml'),
         # 'machine.yaml',
     ]
 
