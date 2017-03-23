@@ -11,7 +11,7 @@ import socket
 import yaml
 import boto3
 
-__version__ = '0.323.0'
+__version__ = '0.323.1'
 
 class Machine(object):
     def __init__(self, *, key_name, security_group_id, ssh_config_path,
@@ -273,10 +273,13 @@ class Machine(object):
         for instance in self._get_all_instances():
             if instance_id == instance.id:
                 return instance
-            for tag in instance.tags:
-                if tag['Key'] == 'Name':
-                    if tag['Value'] == instance_id:
-                        return instance
+            try:
+                for tag in instance.tags:
+                    if tag['Key'] == 'Name':
+                        if tag['Value'] == instance_id:
+                            return instance
+            except:
+                continue
         return None
 
     def _get_all_instances(self):
