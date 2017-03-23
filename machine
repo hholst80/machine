@@ -11,7 +11,7 @@ import socket
 import yaml
 import boto3
 
-__version__ = '0.320.0'
+__version__ = '0.323.0'
 
 class Machine(object):
     def __init__(self, *, key_name, security_group_id, ssh_config_path,
@@ -162,6 +162,15 @@ class Machine(object):
         except:
             print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
 
+    def private_ip(self, *, instance_id, quiet=False, **kwargs):
+        try:
+            instance = self._resolve_instance(instance_id)
+            if not quiet:
+                print(instance.private_ip_address)
+            return instance.private_ip_address
+        except:
+            print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
+
     def create(self, *, instance_type, names, image_id=None, terminate=False,
                **kwargs):
         if image_id is None:
@@ -297,7 +306,7 @@ class Machine(object):
         subparser.set_defaults(command=Machine.ls)
 
         subparser = subparsers.add_parser('create')
-        subparser.add_argument('instance_type')
+        subparser.add_argument('--instance-type', required=True)
         subparser.add_argument('names', type=str, nargs='+')
         subparser.add_argument('--image-id', type=str, default=None)
         subparser.add_argument('--terminate', action='store_true',
@@ -310,10 +319,10 @@ class Machine(object):
             command = getattr(Machine, cmd)
             subparser.set_defaults(command=command)
 
-        for cmd in ['ip', 'type']:
+        for cmd in ['ip', 'type', 'private-ip']:
             subparser = subparsers.add_parser(cmd)
             subparser.add_argument('instance_id')
-            command = getattr(Machine, cmd)
+            command = getattr(Machine, cmd.replace('-', '_'))
             subparser.set_defaults(command=command)
 
         subparser = subparsers.add_parser('export')
