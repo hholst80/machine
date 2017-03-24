@@ -2,22 +2,28 @@
 
 from __future__ import print_function, with_statement
 import argparse
+import datetime
 import fnmatch
 import json
 import os
+import socket
 import subprocess
 import sys
-import socket
+import time
 import yaml
+import _thread
 import boto3
 
-__version__ = '0.323.1'
+__version__ = '0.324.0'
 
 class Machine(object):
     def __init__(self, *, key_name, security_group_id, ssh_config_path,
                  ssh_identity_file, image_user_mapping,
+                 spot_price, availability_zone,
                  instance_type_image_mappings, quiet=False, **kwargs):
         self._quiet = quiet
+        self._sess = boto3.session.Session()
+        # self._ec2 = self._sess.client('ec2')
         self._ec2 = boto3.resource("ec2")
         self._key_name = key_name
         self._security_group_id = security_group_id
@@ -25,6 +31,8 @@ class Machine(object):
         self._ssh_identity_file = ssh_identity_file
         self._image_user_mapping = image_user_mapping
         self._instance_type_image_mappings = instance_type_image_mappings
+        self._spot_price = spot_price
+        self._availability_zone = availability_zone
 
     def version(self, **kwargs):
         print('machine {}'.format(__version__))
@@ -33,34 +41,41 @@ class Machine(object):
 
     def ls(self, **kwargs):
         instances = self._get_all_instances()
+        if not self._quiet:
+            fmtstr = "{:20}{:20}{:20}{:20}\n{:20}{:20}{:20}"
+        else:
+            fmtstr = "{:20}"*6
 
         if not self._quiet:
-            # line = "{:20}{:20}{:20}\n{:20}{:20}{:20}{:20}".format("Name", "Instance Type", "Endpoint",
-            #                                                      "Instance ID", "Instance State", "Services", "Status Checks")
-            line = "{:20}{:20}{:20}\n{:20}{:20}{:20}".format("Name", "Instance Type", "Endpoint",
-                                                                  "Instance ID", "Instance State", "Services")
-            print(line)
+            header_fields = ["Name", "Instance Id", "Instance Type", "Instance State",
+                             "User", "Ip", "Services"]
+            print(fmtstr.format(*header_fields))
             print('-'*80)
 
-        for instance in instances:
+        def collect_output(output, instance):
             id = instance.id
             state = "{Name} ({Code})".format(**instance.state)
             assert id is not None
             name = self._get_name(instance) or ""
             type = instance.instance_type
-            user = self._get_user(instance.image_id)
-            ip = instance.public_ip_address
-            if user and ip:
-                endpoint = "{}@{}".format(user, ip)
-            else:
-                endpoint = ""
-            # checks = self._get_checks(instance) or ""
-            ok_services = " ".join(self._get_services(instance)) or ""
-            if not self._quiet:
-                line = "{:20}{:20}{:20}\n{:20}{:20}{:20}".format(name, type, endpoint, id, state, ok_services)
-            else:
-                line = "{:20}{:20}".format(name, endpoint)
-            print(line)
+            user = self._get_user(instance.image_id) or ""
+            ip = instance.public_ip_address or ""
+            services = " ".join(self._get_services(instance)) or ""
+            fields = (name, id, type, state, user, ip, services)
+            line = fmtstr.format(*fields)
+            output[id] = line
+
+        output = {}
+        num_instances = 0
+        for instance in instances:
+            _thread.start_new_thread(collect_output, (output, instance))
+            num_instances += 1
+
+        while len(output) < num_instances:
+            time.sleep(0.1)
+
+        for instance in instances:
+            print(output[instance.id])
 
     def type(self, *, instance_id, **kwargs):
         try:
@@ -153,14 +168,21 @@ class Machine(object):
         cmd += ('--',) + tuple(commands)
         subprocess.call(cmd)
 
-    def ip(self, *, instance_id, quiet=False, **kwargs):
+    def ip(self, *, private=False, **kwargs):
+        if private:
+            return self.private_ip(**kwargs)
+        else:
+            return self.public_ip(**kwargs)
+
+    def public_ip(self, *, instance_id, quiet=False, **kwargs):
         try:
             instance = self._resolve_instance(instance_id)
             if not quiet:
                 print(instance.public_ip_address)
             return instance.public_ip_address
-        except:
+        except Exception as e:
             print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
+            raise e
 
     def private_ip(self, *, instance_id, quiet=False, **kwargs):
         try:
@@ -168,33 +190,97 @@ class Machine(object):
             if not quiet:
                 print(instance.private_ip_address)
             return instance.private_ip_address
-        except:
+        except Exception as e:
             print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
+            raise e
 
-    def create(self, *, instance_type, names, image_id=None, terminate=False,
-               **kwargs):
+    def create(self, *, spot=False, instance_type, image_id=None, **kwargs):
         if image_id is None:
             image_id = self._resolve_image_id(instance_type)
-        all_names = [self._get_name(instance) for instance in self._get_all_instances()]
-        for name in names:
-            if name in all_names:
-                print('name {} already exists. skipping.'.format(name), file=sys.stderr)
-                continue
-            kwargs = {
-                'ImageId': image_id,
-                'KeyName': self._key_name,
-                'SecurityGroupIds': [self._security_group_id],
-                'InstanceType': instance_type,
-                'EbsOptimized': True,
-                'MinCount': 1,
-                'MaxCount': 1,
-            }
-            if terminate:
-                kwargs.update({'InstanceInitiatedShutdownBehavior':
-                               'terminate'})
-            instance, = self._ec2.create_instances(**kwargs)
+
+        m = self.create_spot if spot else self.create_ondemand
+        m(instance_type=instance_type, image_id=image_id, **kwargs)
+
+    def create_spot(self, *, instance_type, names, image_id, terminate=False, **kwargs):
+        client = self._sess.client('ec2')
+        names = self._filter_names(names)
+        if len(names) == 0:
+            return
+
+        launch_specification = {
+            'ImageId': image_id,
+            'KeyName': self._key_name,
+            'SecurityGroupIds': [self._security_group_id],
+            'InstanceType': instance_type,
+            'Placement': {'AvailabilityZone': self._availability_zone},
+        }
+
+        kwargs = {
+            'SpotPrice': str(self._spot_price),
+            'InstanceCount': len(names),
+            'LaunchSpecification': launch_specification,
+        }
+
+        response = client.request_spot_instances(**kwargs)
+        sir_ids = [sir['SpotInstanceRequestId'] for sir in response['SpotInstanceRequests']]
+
+        # Wait for 10 seconds and verify that we got our instances.
+
+        max_tries = 10
+        tries = 0
+        failed = False
+        # last_msg = None
+
+        while True:
+            time.sleep(1)
+            response = client.describe_spot_instance_requests(SpotInstanceRequestIds=sir_ids)
+            all_fulfilled = True
+            for request in response['SpotInstanceRequests']:
+                # msg = request['Status']['Message']
+                # if msg != last_msg:
+                #     print(msg)
+                #     last_msg = msg
+                if request['Status']['Code'] != 'fulfilled':
+                    all_fulfilled = False
+                    # print('cancelling {}'.format(sir))
+                    # client.cancel_spot_instance_requests(SpotInstanceRequestIds=[sir])
+            if all_fulfilled:
+                break
+            tries += 1
+            if tries >= max_tries:
+                failed = True
+                break
+
+        if failed:
+            client.cancel_spot_instance_requests(SpotInstanceRequestIds=sir_ids)
+            print("Error: Failed to create spot instances", file=sys.stderr)
+            return
+
+        for (name, request) in zip(names, response['SpotInstanceRequests']):
+            instance = self._resolve_instance(request['InstanceId'])
             instance.create_tags(Tags=[{'Key': 'Name', 'Value': name}])
-            all_names.append(name)
+            print('{} {}'.format(instance.id, name))
+
+    def create_ondemand(self, *, instance_type, names, image_id=None, terminate=False, **kwargs):
+        names = self._filter_names(names)
+        if len(names) == 0:
+            return
+        kwargs = {
+            'ImageId': image_id,
+            'KeyName': self._key_name,
+            'SecurityGroupIds': [self._security_group_id],
+            'InstanceType': instance_type,
+            'EbsOptimized': True,
+            'MinCount': len(names),
+            'MaxCount': len(names),
+            'Placement': {'AvailabilityZone': self._availability_zone},
+        }
+        if terminate:
+            kwargs.update({'InstanceInitiatedShutdownBehavior':
+                           'terminate'})
+        instances = self._ec2.create_instances(**kwargs)
+        for name, instance in zip(names, instances):
+            instance.create_tags(Tags=[{'Key': 'Name', 'Value': name}])
             print('{} {}'.format(instance.id, name))
 
     def export(self, **kwargs):
@@ -290,6 +376,16 @@ class Machine(object):
         ])
         return instances
 
+    def _filter_names(self, names):
+        all_instances = self._get_all_instances
+        all_names = [self._get_name(instance) for instance in all_instances]
+        new_names = []
+        for name in names:
+            if name in all_names:
+                print('name {} already exists. skipping.'.format(name), file=sys.stderr)
+                continue
+            new_names.append(name)
+        return new_names
     @staticmethod
     def get_parser():
         parser = argparse.ArgumentParser()
@@ -314,6 +410,7 @@ class Machine(object):
         subparser.add_argument('--image-id', type=str, default=None)
         subparser.add_argument('--terminate', action='store_true',
                                help='terminate on shutdown')
+        subparser.add_argument('--spot', action='store_true')
         subparser.set_defaults(command=Machine.create)
 
         for cmd in ['start', 'stop', 'rm']:
@@ -322,11 +419,14 @@ class Machine(object):
             command = getattr(Machine, cmd)
             subparser.set_defaults(command=command)
 
-        for cmd in ['ip', 'type', 'private-ip']:
-            subparser = subparsers.add_parser(cmd)
-            subparser.add_argument('instance_id')
-            command = getattr(Machine, cmd.replace('-', '_'))
-            subparser.set_defaults(command=command)
+        subparser = subparsers.add_parser('type')
+        subparser.add_argument('instance_id')
+        subparser.set_defaults(command=Machine.type)
+
+        subparser = subparsers.add_parser('ip')
+        subparser.add_argument('instance_id')
+        subparser.add_argument('--private', action='store_true')
+        subparser.set_defaults(command=Machine.ip)
 
         subparser = subparsers.add_parser('export')
         subparser.set_defaults(command=Machine.export)
