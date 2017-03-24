@@ -48,7 +48,7 @@ class Machine(object):
 
         if not self._quiet:
             header_fields = ["Name", "Instance Id", "Instance Type", "Instance State",
-                             "User", "Ip", "Services"]
+                             "Ip", "User", "Services"]
             print(fmtstr.format(*header_fields))
             print('-'*80)
 
@@ -61,7 +61,7 @@ class Machine(object):
             user = self._get_user(instance.image_id) or ""
             ip = instance.public_ip_address or ""
             services = " ".join(self._get_services(instance)) or ""
-            fields = (name, id, type, state, user, ip, services)
+            fields = (name, id, type, state, ip, user, services)
             line = fmtstr.format(*fields)
             output[id] = line
 
@@ -377,7 +377,7 @@ class Machine(object):
         return instances
 
     def _filter_names(self, names):
-        all_instances = self._get_all_instances
+        all_instances = self._get_all_instances()
         all_names = [self._get_name(instance) for instance in all_instances]
         new_names = []
         for name in names:
