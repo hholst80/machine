@@ -213,6 +213,7 @@ class Machine(object):
             'SecurityGroupIds': [self._security_group_id],
             'InstanceType': instance_type,
             'Placement': {'AvailabilityZone': self._availability_zone},
+            'EbsOptimized': True,
         }
 
         kwargs = {
