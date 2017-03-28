@@ -7,6 +7,7 @@ ssh_identity_file: "~/.ssh/id_rsa"
 
 spot_price: 1.5
 availability_zone: "us-east-1a"
+ebs_optimized: false
 
 instance_type_image_mappings:
   - "*": ami-e6d5d2f1       # Default AMI: Ubuntu 16.04 LTS

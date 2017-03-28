@@ -14,12 +14,12 @@ import yaml
 import _thread
 import boto3
 
-__version__ = '0.324.0'
+__version__ = '0.328.0'
 
 class Machine(object):
     def __init__(self, *, key_name, security_group_id, ssh_config_path,
                  ssh_identity_file, image_user_mapping,
-                 spot_price, availability_zone,
+                 spot_price, availability_zone, ebs_optimized,
                  instance_type_image_mappings, quiet=False, **kwargs):
         self._quiet = quiet
         self._sess = boto3.session.Session()
@@ -33,6 +33,7 @@ class Machine(object):
         self._instance_type_image_mappings = instance_type_image_mappings
         self._spot_price = spot_price
         self._availability_zone = availability_zone
+        self._ebs_optimized = ebs_optimized
 
     def version(self, **kwargs):
         print('machine {}'.format(__version__))
@@ -213,7 +214,7 @@ class Machine(object):
             'SecurityGroupIds': [self._security_group_id],
             'InstanceType': instance_type,
             'Placement': {'AvailabilityZone': self._availability_zone},
-            'EbsOptimized': True,
+            'EbsOptimized': self._ebs_optimized,
         }
 
         kwargs = {
@@ -271,7 +272,7 @@ class Machine(object):
             'KeyName': self._key_name,
             'SecurityGroupIds': [self._security_group_id],
             'InstanceType': instance_type,
-            'EbsOptimized': True,
+            'EbsOptimized': self._ebs_optimized,
             'MinCount': len(names),
             'MaxCount': len(names),
             'Placement': {'AvailabilityZone': self._availability_zone},
