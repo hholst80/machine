@@ -14,7 +14,7 @@ import yaml
 import _thread
 import boto3
 
-__version__ = '0.328.0'
+__version__ = '0.329.0'
 
 class Machine(object):
     def __init__(self, *, key_name, security_group_id, ssh_config_path,
@@ -43,13 +43,13 @@ class Machine(object):
     def ls(self, **kwargs):
         instances = self._get_all_instances()
         if not self._quiet:
-            fmtstr = "{:20}{:20}{:20}{:20}\n{:20}{:20}{:20}"
+            fmtstr = "{:20}{:20}{:20}{:20}\n{:20}{:20}{:20}{:20}"
         else:
             fmtstr = "{:20}"*6
 
         if not self._quiet:
             header_fields = ["Name", "Instance Id", "Instance Type", "Instance State",
-                             "Ip", "User", "Services"]
+                             "Ip", "User", "Services", "Spot"]
             print(fmtstr.format(*header_fields))
             print('-'*80)
 
@@ -62,7 +62,8 @@ class Machine(object):
             user = self._get_user(instance.image_id) or ""
             ip = instance.public_ip_address or ""
             services = " ".join(self._get_services(instance)) or ""
-            fields = (name, id, type, state, ip, user, services)
+            spot = "Yes" if instance.spot_instance_request_id is not None else ""
+            fields = (name, id, type, state, ip, user, services, spot)
             line = fmtstr.format(*fields)
             output[id] = line
 
