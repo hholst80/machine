@@ -2,7 +2,6 @@
 
 from __future__ import print_function, with_statement
 import argparse
-import datetime
 import fnmatch
 import json
 import os
@@ -14,7 +13,8 @@ import yaml
 import _thread
 import boto3
 
-__version__ = '0.329.0'
+__version__ = '0.401.0'
+
 
 class Machine(object):
     def __init__(self, *, key_name, security_group_id, ssh_config_path,
@@ -45,11 +45,13 @@ class Machine(object):
         if not self._quiet:
             fmtstr = "{:20}{:20}{:20}{:20}\n{:20}{:20}{:20}{:20}"
         else:
-            fmtstr = "{:20}"*6
+            fmtstr = "{:20}"*4
 
         if not self._quiet:
-            header_fields = ["Name", "Instance Id", "Instance Type", "Instance State",
-                             "Ip", "User", "Services", "Spot"]
+            header_fields = ["Name", "Instance Id",
+                             "Instance Type", "Instance State",
+                             "Ip", "User",
+                             "Services", "Spot"]
             print(fmtstr.format(*header_fields))
             print('-'*80)
 
@@ -62,7 +64,8 @@ class Machine(object):
             user = self._get_user(instance.image_id) or ""
             ip = instance.public_ip_address or ""
             services = " ".join(self._get_services(instance)) or ""
-            spot = "Yes" if instance.spot_instance_request_id is not None else ""
+            spot = ("Yes" if instance.spot_instance_request_id is not None
+                    else "")
             fields = (name, id, type, state, ip, user, services, spot)
             line = fmtstr.format(*fields)
             output[id] = line
@@ -85,7 +88,8 @@ class Machine(object):
             print(instance.instance_type)
             return instance.instance_type
         except:
-            print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
+            print('Host does not exist: "{}"'.format(instance_id),
+                  file=sys.stderr)
 
     def start(self, *, ids, **kwargs):
         for _id in ids:
@@ -183,7 +187,8 @@ class Machine(object):
                 print(instance.public_ip_address)
             return instance.public_ip_address
         except Exception as e:
-            print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
+            print('Host does not exist: "{}"'.format(instance_id),
+                  file=sys.stderr)
             raise e
 
     def private_ip(self, *, instance_id, quiet=False, **kwargs):
@@ -193,7 +198,8 @@ class Machine(object):
                 print(instance.private_ip_address)
             return instance.private_ip_address
         except Exception as e:
-            print('Host does not exist: "{}"'.format(instance_id), file=sys.stderr)
+            print('Host does not exist: "{}"'.format(instance_id),
+                  file=sys.stderr)
             raise e
 
     def create(self, *, spot=False, instance_type, image_id=None, **kwargs):
@@ -203,7 +209,8 @@ class Machine(object):
         m = self.create_spot if spot else self.create_ondemand
         m(instance_type=instance_type, image_id=image_id, **kwargs)
 
-    def create_spot(self, *, instance_type, names, image_id, terminate=False, **kwargs):
+    def create_spot(self, *, instance_type, names, image_id, terminate=False,
+                    **kwargs):
         client = self._sess.client('ec2')
         names = self._filter_names(names)
         if len(names) == 0:
@@ -225,37 +232,34 @@ class Machine(object):
         }
 
         response = client.request_spot_instances(**kwargs)
-        sir_ids = [sir['SpotInstanceRequestId'] for sir in response['SpotInstanceRequests']]
+        sir_ids = [sir['SpotInstanceRequestId'] for sir in
+                   response['SpotInstanceRequests']]
 
-        # Wait for 10 seconds and verify that we got our instances.
-
-        max_tries = 10
-        tries = 0
         failed = False
-        # last_msg = None
-
+        # TODO catch ctrl-c here and set failed to True if aborted
         while True:
             time.sleep(1)
-            response = client.describe_spot_instance_requests(SpotInstanceRequestIds=sir_ids)
-            all_fulfilled = True
+            response = client.describe_spot_instance_requests(
+                SpotInstanceRequestIds=sir_ids
+            )
+            count_fulfilled = 0
+            count_total = 0
             for request in response['SpotInstanceRequests']:
-                # msg = request['Status']['Message']
-                # if msg != last_msg:
-                #     print(msg)
-                #     last_msg = msg
-                if request['Status']['Code'] != 'fulfilled':
-                    all_fulfilled = False
-                    # print('cancelling {}'.format(sir))
-                    # client.cancel_spot_instance_requests(SpotInstanceRequestIds=[sir])
-            if all_fulfilled:
+                count_total += 1
+                if request['Status']['Code'] == 'fulfilled':
+                    count_fulfilled += 1
+            if count_fulfilled == count_total:
                 break
-            tries += 1
-            if tries >= max_tries:
-                failed = True
-                break
+            if not self._quiet:
+                print("spot instance request: {} of {} requested"
+                      .format(count_fulfilled, count_total), end='\r')
+        if not self._quiet:
+            print(" "*80, end='\r')
 
         if failed:
-            client.cancel_spot_instance_requests(SpotInstanceRequestIds=sir_ids)
+            client.cancel_spot_instance_requests(
+                SpotInstanceRequestIds=sir_ids
+            )
             print("Error: Failed to create spot instances", file=sys.stderr)
             return
 
@@ -264,7 +268,8 @@ class Machine(object):
             instance.create_tags(Tags=[{'Key': 'Name', 'Value': name}])
             print('{} {}'.format(instance.id, name))
 
-    def create_ondemand(self, *, instance_type, names, image_id=None, terminate=False, **kwargs):
+    def create_ondemand(self, *, instance_type, names, image_id=None,
+                        terminate=False, **kwargs):
         names = self._filter_names(names)
         if len(names) == 0:
             return
@@ -302,7 +307,8 @@ class Machine(object):
                     f.write("Host {}\n".format(host))
                     f.write("\tHostname {}\n".format(ip))
                     f.write("\tUser {}\n".format(user))
-                    f.write("\tIdentityFile {}\n".format(self._ssh_identity_file))
+                    f.write("\tIdentityFile {}\n"
+                            .format(self._ssh_identity_file))
                     f.write("\tStrictHostKeyChecking {}\n".format("no"))
                     f.write("\tUserKnownHostsFile {}\n".format("/dev/null"))
                     f.write("\tLogLevel {}\n".format("quiet"))
@@ -335,8 +341,6 @@ class Machine(object):
         checks[key] = checks.get(key, 0) + 1
         key = data['SystemStatus']['Status']
         checks[key] = checks.get(key, 0) + 1
-        # if checks.get('initializing', 0) >= 1:
-        #     return "Initializing"
         return '{}/2 checks passed'.format(checks.get('ok', 0))
 
     def _get_name(self, instance):
@@ -385,10 +389,12 @@ class Machine(object):
         new_names = []
         for name in names:
             if name in all_names:
-                print('name {} already exists. skipping.'.format(name), file=sys.stderr)
+                print('name {} already exists. skipping.'.format(name),
+                      file=sys.stderr)
                 continue
             new_names.append(name)
         return new_names
+
     @staticmethod
     def get_parser():
         parser = argparse.ArgumentParser()
@@ -446,7 +452,8 @@ class Machine(object):
                                help='recursively copy entire directories')
         subparser.add_argument('-v', dest='verbose', action='store_true',
                                help='verbose mode')
-        subparser.add_argument('-F', '--ssh-config-path', default='/tmp/ssh_config',
+        subparser.add_argument('-F', '--ssh-config-path',
+                               default='/tmp/ssh_config',
                                help='ssh_config path')
         subparser.add_argument('commands', type=str, nargs='*')
         subparser.set_defaults(command=Machine.scp)
@@ -465,6 +472,7 @@ class Machine(object):
         subparser.set_defaults(command=Machine.image_rm)
 
         return parser
+
 
 def main(argv):
     parser = Machine.get_parser()
