@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+#
+# TODO:
+#
+# - Split business logic and backend into separate classes
+#   to support docker-machine, digital-ocean, aws, ... backends.
 
 from __future__ import print_function, with_statement
 import argparse
@@ -13,7 +18,7 @@ import yaml
 import _thread
 import boto3
 
-__version__ = '0.401.0'
+__version__ = '0.403.0'
 
 
 class Machine(object):
@@ -209,6 +214,14 @@ class Machine(object):
         m = self.create_spot if spot else self.create_ondemand
         m(instance_type=instance_type, image_id=image_id, **kwargs)
 
+    def cleanup(self, **kwargs):
+        instances = self._get_all_instances()
+        for instance in instances:
+            name = self._get_name(instance)
+            if not name:
+                instance.terminate()
+                print('terminating {}'.format(instance.id))
+
     def create_spot(self, *, instance_type, names, image_id, terminate=False,
                     **kwargs):
         client = self._sess.client('ec2')
@@ -235,32 +248,39 @@ class Machine(object):
         sir_ids = [sir['SpotInstanceRequestId'] for sir in
                    response['SpotInstanceRequests']]
 
-        failed = False
-        # TODO catch ctrl-c here and set failed to True if aborted
-        while True:
-            time.sleep(1)
-            response = client.describe_spot_instance_requests(
-                SpotInstanceRequestIds=sir_ids
-            )
-            count_fulfilled = 0
-            count_total = 0
-            for request in response['SpotInstanceRequests']:
-                count_total += 1
-                if request['Status']['Code'] == 'fulfilled':
-                    count_fulfilled += 1
-            if count_fulfilled == count_total:
-                break
+        try:
+            while True:
+                time.sleep(1)
+                response = client.describe_spot_instance_requests(
+                    SpotInstanceRequestIds=sir_ids
+                )
+                count_fulfilled = 0
+                count_total = 0
+                for request in response['SpotInstanceRequests']:
+                    count_total += 1
+                    if request['Status']['Code'] == 'fulfilled':
+                        count_fulfilled += 1
+                if count_fulfilled == count_total:
+                    break
+                if not self._quiet:
+                    print("spot instance request: {} of {} requested"
+                          .format(count_fulfilled, count_total), end='\r')
             if not self._quiet:
-                print("spot instance request: {} of {} requested"
-                      .format(count_fulfilled, count_total), end='\r')
-        if not self._quiet:
-            print(" "*80, end='\r')
-
-        if failed:
+                print(" "*80, end='\r')
+        except KeyboardInterrupt:
+            print("Aborting create spot instances request", file=sys.stderr)
             client.cancel_spot_instance_requests(
                 SpotInstanceRequestIds=sir_ids
             )
-            print("Error: Failed to create spot instances", file=sys.stderr)
+            response = client.describe_spot_instance_requests(
+                SpotInstanceRequestIds=sir_ids
+            )
+            try:
+                for request in response['SpotInstanceRequests']:
+                    instance = self._resolve_instance(request['InstanceId'])
+                    instance.terminate()
+            except:
+                pass
             return
 
         for (name, request) in zip(names, response['SpotInstanceRequests']):
@@ -470,6 +490,9 @@ class Machine(object):
         subparser = subparsers.add_parser('image-rm')
         subparser.add_argument('images', nargs='*')
         subparser.set_defaults(command=Machine.image_rm)
+
+        subparser = subparsers.add_parser('cleanup')
+        subparser.set_defaults(command=Machine.cleanup)
 
         return parser
 
