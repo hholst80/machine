@@ -128,6 +128,7 @@ class Machine(object):
                     print("error: no such instance {}".format(_id),
                           file=sys.stderr)
                     continue
+                instance.delete_tags(Tags=[{'Key': 'Name'}])
                 result = instance.terminate()
                 if result['ResponseMetadata']['HTTPStatusCode'] != 200:
                     self._display_json(result, file=sys.stderr)
