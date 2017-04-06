@@ -18,7 +18,7 @@ import yaml
 import _thread
 import boto3
 
-__version__ = '0.403.0'
+__version__ = '0.406.0'
 
 
 class Machine(object):
