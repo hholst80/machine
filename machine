@@ -332,7 +332,7 @@ class Machine(object):
                             .format(self._ssh_identity_file))
                     f.write("\tStrictHostKeyChecking {}\n".format("no"))
                     f.write("\tUserKnownHostsFile {}\n".format("/dev/null"))
-                    f.write("\tLogLevel {}\n".format("quiet"))
+                    f.write("\tLogLevel {}\n".format("INFO"))
 
     def _get_services(self, instance, services={'ssh': 22}):
         ip = self.ip(instance_id=instance.id, quiet=True)
